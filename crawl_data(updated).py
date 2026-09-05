@@ -7,8 +7,22 @@ import pandas as pd
 from pathlib import Path
 import tldextract
 
-iterations = 1
+iterations = 10
 urls = [
+        'https://x.com/',
+        'https://www.amazon.com/',
+        'https://www.google.com/',
+        'https://www.bing.com/',
+        'https://www.youtube.com/',
+        'https://www.whatsapp.com/',
+        'https://www.stackoverflow.com/',
+        'https://www.wikipedia.org/',
+        'https://www.microsoft.com/',
+        'https://wordpress.org/',
+        'https://www.apple.com/',
+        'https://www.php.net/',
+        'https://www.mozilla.org/',
+        'https://github.com/',
         'https://www.slideshare.net/'
         ]
 dat = {
@@ -39,7 +53,6 @@ for url in urls:
         dat['tls_time_ms'].append((c.getinfo((pycurl.APPCONNECT_TIME)) - c.getinfo(pycurl.CONNECT_TIME))*1000)
         dat['http_status'].append(c.getinfo(pycurl.HTTP_CODE))
         dat['response_time_ms'].append(c.getinfo(pycurl.TOTAL_TIME)*1000)
-        print(c.getinfo(pycurl.SIZE_DOWNLOAD))
 
         c.close()
 
@@ -49,3 +62,8 @@ for url in urls:
         dat['time_of_day'].append(int(a.strftime('%H') + a.strftime('%M') + a.strftime('%S')))
         dat['domain_type'].append(url_components.suffix)
 
+df = pd.DataFrame(dat)
+if Path('D:/Dataset.csv').exists():
+    df.to_csv('D:/Dataset.csv', index=False, header=False, mode='a')
+else:
+    df.to_csv('D:/Dataset.csv', index=False)
