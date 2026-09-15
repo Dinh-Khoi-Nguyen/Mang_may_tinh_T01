@@ -1,0 +1,15 @@
+feature,pearson_r
+domain_category_social networking,0.6041423992703882
+response_size,0.5352826488855559
+tls_time_ms,0.3925833279640699
+rtt_ms,0.39216723325127595
+tcp_connect_ms,0.36526549958468546
+domain_category_news,-0.28647994641158236
+domain_category_search engine,-0.23076643637103253
+dns_time_ms,0.1957468725310717
+domain_category_technology,-0.11770419289054632
+time_sin,0.06885702583345002
+domain_category_entertainment,0.06604558941873523
+domain_category_shopping,0.05447001845149957
+time_cos,-0.02890079068040046
+domain_category_reference,-0.004444042412963945

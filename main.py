@@ -46,17 +46,20 @@ def nice(name):
 
 
 def _save_fig(path):
-    """Common save/close boilerplate. Was duplicated 4x across plotting funcs."""
+    """Common save/close boilerplate."""
     plt.tight_layout()
     plt.savefig(path, dpi=120)
     plt.close()
 
-DATA_PATH = Path(__file__).resolve().parent / "inputs" /"Dataset_finale.csv"
+
+DATA_PATH = Path(__file__).resolve().parent / "inputs" / "Dataset_finale.csv"
 OUT_DIR = Path(__file__).resolve().parent / "outputs"
 OUT_DIR.mkdir(exist_ok=True)
 
 
-# ---------------------------------------------------------------- 1. LOAD
+# ==================================================================
+# 1. LOAD
+# ==================================================================
 def load_data(path=DATA_PATH):
     df = pd.read_csv(path)
     df.columns = df.columns.str.strip()
@@ -64,9 +67,20 @@ def load_data(path=DATA_PATH):
     return df
 
 
-# ---------------------------------------------------------------- 2. CLEAN (structural, pre-split)
-def clean_structural(df):
+# ==================================================================
+# 2. CLEAN
+#    2a. structural (null/dup, http_status, cross-field check) - pre-split
+#    2b. split (train/test)
+#    2c. statistical (Isolation Forest, fit on train only) - post-split
+#    Nulls/duplicates are real, not hypothetical: Crawl_code_new.py appends
+#    to Dataset_finale.csv across separate crawl runs (mode="a"), so
+#    re-running the crawler can reintroduce duplicate rows; an interrupted
+#    run can also leave partial/null rows. Both are dropped here.
+# ==================================================================
+def clean(df, numeric_cols, test_size=0.2, random_state=42, contamination=0.02):
     df = df.copy()
+
+    # --- 2a. structural (pre-split) ---
     n_null, n_dup = df.isnull().sum().sum(), df.duplicated().sum()
     print(f"[clean] nulls={n_null}, dupes={n_dup}")
     if n_null:
@@ -86,18 +100,13 @@ def clean_structural(df):
 
     df["domain_category"] = df["domain_category"].str.strip().str.lower()
     print(f"[clean] structural clean done, shape={df.shape}")
-    return df
 
-
-def split_data(df, test_size=0.2, random_state=42):
+    # --- 2b. split ---
     train_df, test_df = train_test_split(df, test_size=test_size, random_state=random_state)
     print(f"[split] train={train_df.shape}, test={test_df.shape}")
-    return train_df, test_df
 
-
-def clean_statistical(train_df, test_df, numeric_cols):
-    """Fit outlier rule on TRAIN only, apply identical rule to both."""
-    model = IsolationForest(contamination=0.02, random_state=42)
+    # --- 2c. statistical (Isolation Forest, fit on TRAIN only) ---
+    model = IsolationForest(contamination=contamination, random_state=random_state)
     model.fit(train_df[numeric_cols])
 
     train_pred = model.predict(train_df[numeric_cols])
@@ -110,107 +119,28 @@ def clean_statistical(train_df, test_df, numeric_cols):
           f"({len(train_clean)} remain)")
     print(f"[clean-stat] test: dropped {len(test_df)-len(test_clean)} anomalies "
           f"({len(test_clean)} remain)")
+
     return train_clean, test_clean
 
 
-# ---------------------------------------------------------------- 3. ANALYZE
+# ==================================================================
+# 3. ANALYZE
+# ==================================================================
 def analyze(df, label="train"):
     print(f"\n[analyze:{label}] describe:")
     print(df.describe())
+    df.describe().to_csv(OUT_DIR / f"describe_{label}.csv")
     print(f"\n[analyze:{label}] domain_category counts:")
     print(df["domain_category"].value_counts())
+    df["domain_category"].value_counts().to_csv(OUT_DIR / f"domain_counts_{label}.csv")
 
 
-# ---------------------------------------------------------------- 4. FEATURE ENGINEERING
-def encode_time_cyclical(df):
-    td = df["time_of_day"]
-    h, m, s = td // 10000, (td // 100) % 100, td % 100
-    bad = (h > 23) | (m > 59) | (s > 59)
-    if bad.any():
-        raise ValueError(f"invalid HHMMSS values: {td[bad].tolist()}")
-    total_seconds = h * 3600 + m * 60 + s
-    theta = 2 * np.pi * (total_seconds / 86400)
-    df["time_sin"] = np.sin(theta)
-    df["time_cos"] = np.cos(theta)
-    return df.drop(columns=["time_of_day"])
-
-
-def feature_engineer(train_df, test_df):
-    train_df = encode_time_cyclical(train_df.copy())
-    test_df = encode_time_cyclical(test_df.copy())
-
-    # one-hot encode domain_category, fit categories on train, align test
-    train_df = pd.get_dummies(train_df, columns=["domain_category"], drop_first=True)
-    test_df = pd.get_dummies(test_df, columns=["domain_category"], drop_first=True)
-    test_df = test_df.reindex(columns=train_df.columns, fill_value=0)
-
-    print(f"[feat] train cols: {list(train_df.columns)}")
-    return train_df, test_df
-
-
-def scale_features(train_df, test_df, feature_cols):
-    """Fit scaler on train only, transform both."""
-    scaler = StandardScaler()
-    train_scaled = train_df.copy()
-    test_scaled = test_df.copy()
-    train_scaled[feature_cols] = scaler.fit_transform(train_df[feature_cols])
-    test_scaled[feature_cols] = scaler.transform(test_df[feature_cols])
-    return train_scaled, test_scaled, scaler
-
-
-# ---------------------------------------------------------------- 5. BASELINE / MODEL
-def train_models(X_train, y_train):
-    models = {}
-
-    class MeanBaseline:
-        def fit(self, X, y):
-            self.value = y.mean()
-            return self
-        def predict(self, X):
-            return np.full(len(X), self.value)
-
-    baseline = MeanBaseline().fit(X_train, y_train)
-    models["baseline_mean"] = baseline
-
-    lr = LinearRegression().fit(X_train, y_train)
-    models["linear_regression"] = lr
-
-    dt = DecisionTreeRegressor(max_depth=6, random_state=42).fit(X_train, y_train)
-    models["decision_tree"] = dt
-
-    rf = RandomForestRegressor(n_estimators=200, max_depth=8, random_state=42).fit(X_train, y_train)
-    models["random_forest"] = rf
-
-    print(f"[model] trained: {list(models.keys())}")
-    return models
-
-
-# ---------------------------------------------------------------- 6. EVALUATE
-def evaluate(models, X_test, y_test):
-    rows = []
-    preds = {}
-    for name, m in models.items():
-        pred = m.predict(X_test)
-        preds[name] = pred
-        mape = np.mean(np.abs((y_test.values - pred) / y_test.values)) * 100
-        rows.append({
-            "model": name,
-            "MAE": mean_absolute_error(y_test, pred),
-            "RMSE": np.sqrt(mean_squared_error(y_test, pred)),
-            "R2": r2_score(y_test, pred),
-            "MAPE_%": mape,
-            "Accuracy_%": 100 - mape,
-        })
-    result = pd.DataFrame(rows)
-    print("\n[evaluate]")
-    print(result.to_string(index=False))
-    return result, preds
-
-
-# ---------------------------------------------------------------- 6b. CORRELATION
+# ==================================================================
+# PEARSON CORRELATION — outside the Load->Clean->...->Visualize pipeline.
+# Property of the (feature-engineered) data itself, independent of any
+# model. Fit/computed on TRAIN only, never touches test.
+# ==================================================================
 def compute_correlations(df, target="response_time_ms"):
-    """Pearson correlation between every numeric feature and the target.
-    Saved once, on the (feature-engineered) TRAIN split only."""
     numeric_feats = [c for c in df.select_dtypes(include=["number", "bool"]).columns
                       if c != target]
 
@@ -230,7 +160,6 @@ def compute_correlations(df, target="response_time_ms"):
 
 
 def visualize_correlations(corr_df):
-    """Horizontal bar chart of Pearson r per feature, sorted by magnitude."""
     plt.figure(figsize=(7, max(4, 0.35 * len(corr_df))))
     labels = [nice(f) for f in corr_df["feature"]]
     colors = ["#4C72B0" if v >= 0 else "#C44E52" for v in corr_df["pearson_r"]]
@@ -248,100 +177,158 @@ def visualize_correlations(corr_df):
     print(f"[correlate] saved correlation diagram -> {out_path}")
 
 
-# ---------------------------------------------------------------- 6c. NETWORKING-ANGLE BREAKDOWN
-def analyze_network_components(df, target="response_time_ms"):
-    """Split response time into measured network stages (DNS+TCP+TLS+RTT)
-    vs. everything else (server processing, queueing, payload transfer).
-    This is the data needed to interpret results 'from a networking
-    perspective' rather than just reporting model scores."""
-    comp = df.copy()
-    comp["network_ms"] = (comp["dns_time_ms"] + comp["tcp_connect_ms"]
-                           + comp["tls_time_ms"] + comp["rtt_ms"])
-    comp["other_ms"] = comp[target] - comp["network_ms"]
-    comp["network_pct"] = comp["network_ms"] / comp[target] * 100
-    comp["other_pct"] = 100 - comp["network_pct"]
-
-    by_domain = (comp.groupby("domain_category")[["network_ms", "other_ms",
-                                                     "network_pct", "other_pct"]]
-                 .mean().reset_index().sort_values("network_pct", ascending=False))
-
-    out_path = OUT_DIR / "network_component_breakdown.csv"
-    by_domain.to_csv(out_path, index=False)
-    print(f"[net-breakdown] saved network vs. other time by domain -> {out_path}")
-
-    # stacked bar chart: avg ms spent in network stages vs. "other"
-    plt.figure(figsize=(7, max(4, 0.4 * len(by_domain))))
-    y_pos = np.arange(len(by_domain))
-    plt.barh(y_pos, by_domain["network_ms"], color="#4C72B0",
-              label="Network time (DNS+TCP+TLS+RTT)")
-    plt.barh(y_pos, by_domain["other_ms"], left=by_domain["network_ms"],
-              color="#DD8452", label="Other time (server, queue, payload)")
-    plt.yticks(y_pos, [nice(d) for d in by_domain["domain_category"]])
-    plt.xlabel("Average Response Time (ms)")
-    plt.title("Response Time Breakdown by Domain Category")
-    plt.legend(loc="lower right", fontsize=8, frameon=False)
-    plt.gca().invert_yaxis()
-
-    fig_path = OUT_DIR / "network_component_breakdown.png"
-    _save_fig(fig_path)
-    print(f"[net-breakdown] saved breakdown diagram -> {fig_path}")
-    return by_domain
+# ==================================================================
+# 4. FEATURE ENGINEERING
+#    cyclical time encoding + one-hot domain_category + scaling.
+#    Categories/scaler fit on TRAIN only, applied to test.
+# ==================================================================
+def _encode_time_cyclical(df):
+    td = df["time_of_day"]
+    h, m, s = td // 10000, (td // 100) % 100, td % 100
+    bad = (h > 23) | (m > 59) | (s > 59)
+    if bad.any():
+        raise ValueError(f"invalid HHMMSS values: {td[bad].tolist()}")
+    total_seconds = h * 3600 + m * 60 + s
+    theta = 2 * np.pi * (total_seconds / 86400)
+    df["time_sin"] = np.sin(theta)
+    df["time_cos"] = np.cos(theta)
+    return df.drop(columns=["time_of_day"])
 
 
-# ---------------------------------------------------------------- 6d. ERROR ANALYSIS
-def analyze_errors(test_raw, y_test, preds, model_name="random_forest", top_n=15):
-    """Pull the worst-predicted test requests (largest |residual|) with their
-    original, human-readable feature values, plus mean error by domain
-    category. Feeds directly into the Chapter 5 'error analysis' section:
-    which cases does the model get wrong, and is there a pattern."""
-    pred = preds[model_name]
-    residual = y_test.values - pred
+def feature_engineer(train_df, test_df):
+    # cyclical time encoding
+    train_df = _encode_time_cyclical(train_df.copy())
+    test_df = _encode_time_cyclical(test_df.copy())
 
-    err_df = test_raw.loc[y_test.index].copy()
-    err_df["actual_response_time_ms"] = y_test.values
-    err_df["predicted_response_time_ms"] = pred
-    err_df["residual_ms"] = residual
-    err_df["abs_residual_ms"] = np.abs(residual)
-    err_df = err_df.sort_values("abs_residual_ms", ascending=False)
+    # one-hot encode domain_category, fit categories on train, align test
+    train_df = pd.get_dummies(train_df, columns=["domain_category"], drop_first=True)
+    test_df = pd.get_dummies(test_df, columns=["domain_category"], drop_first=True)
+    test_df = test_df.reindex(columns=train_df.columns, fill_value=0)
 
-    worst_path = OUT_DIR / f"error_analysis_{model_name}_top{top_n}.csv"
-    err_df.head(top_n).to_csv(worst_path, index=False)
-    print(f"[error] saved top {top_n} worst predictions ({model_name}) -> {worst_path}")
+    print(f"[feat] train cols: {list(train_df.columns)}")
 
-    by_domain = (err_df.groupby("domain_category")["abs_residual_ms"]
-                 .agg(mean_abs_error="mean", count="count")
-                 .reset_index().sort_values("mean_abs_error", ascending=False))
-    domain_path = OUT_DIR / f"error_by_domain_{model_name}.csv"
-    by_domain.to_csv(domain_path, index=False)
-    print(f"[error] saved mean error by domain ({model_name}) -> {domain_path}")
+    # scale (fit on train only, transform both)
+    feature_cols = [c for c in train_df.columns if c != "response_time_ms"]
+    scaler = StandardScaler()
+    train_df[feature_cols] = scaler.fit_transform(train_df[feature_cols])
+    test_df[feature_cols] = scaler.transform(test_df[feature_cols])
 
-    return err_df, by_domain
+    return train_df, test_df, feature_cols, scaler
 
 
-# ---------------------------------------------------------------- 7. VISUALIZE
-def visualize_feature_target(df, target="response_time_ms"):
-    """Feature-vs-target scatter plots. Property of the data, not any
-    one model's output - generated once, independent of models."""
+# ==================================================================
+# 5. TRAIN MODELS
+# ==================================================================
+def train_models(X_train, y_train):
+    models = {}
+
+    class MeanBaseline:
+        def fit(self, X, y):
+            self.value = y.mean()
+            return self
+        def predict(self, X):
+            return np.full(len(X), self.value)
+
+    models["baseline_mean"] = MeanBaseline().fit(X_train, y_train)
+    models["linear_regression"] = LinearRegression().fit(X_train, y_train)
+    models["decision_tree"] = DecisionTreeRegressor(
+        max_depth=6, random_state=42).fit(X_train, y_train)
+    models["random_forest"] = RandomForestRegressor(
+        n_estimators=200, max_depth=8, random_state=42).fit(X_train, y_train)
+
+    print(f"[model] trained: {list(models.keys())}")
+    return models
+
+
+# ==================================================================
+# 6. EVALUATE
+#    metrics (MAE/RMSE/R2/MAPE/Accuracy) + coefficients/importances
+#    + worst-prediction error analysis (non-baseline models)
+# ==================================================================
+def evaluate(models, X_test, y_test, test_raw, feature_cols,
+             error_top_n=10, error_models=("linear_regression", "decision_tree", "random_forest")):
+    # --- metrics ---
+    rows = []
+    preds = {}
+    for name, m in models.items():
+        pred = m.predict(X_test)
+        preds[name] = pred
+        mape = np.mean(np.abs((y_test.values - pred) / y_test.values)) * 100
+        rows.append({
+            "model": name,
+            "MAE": mean_absolute_error(y_test, pred),
+            "RMSE": np.sqrt(mean_squared_error(y_test, pred)),
+            "R2": r2_score(y_test, pred),
+            "MAPE_%": mape,
+            "Accuracy_%": 100 - mape,
+        })
+    results = pd.DataFrame(rows)
+    print("\n[evaluate]")
+    print(results.to_string(index=False))
+
+    # --- coefficients / feature importances ---
+    coef_rows = []
+    for name, m in models.items():
+        if hasattr(m, "coef_"):
+            for feat, val in zip(feature_cols, m.coef_):
+                coef_rows.append({"model": name, "feature": feat,
+                                   "value": val, "value_type": "coefficient"})
+        elif hasattr(m, "feature_importances_"):
+            for feat, val in zip(feature_cols, m.feature_importances_):
+                coef_rows.append({"model": name, "feature": feat,
+                                   "value": val, "value_type": "importance"})
+        else:
+            print(f"[coef] {name} has no coefficients/importances, skipped")
+    coef_df = pd.DataFrame(coef_rows)
+    coef_path = OUT_DIR / "model_coefficients.csv"
+    coef_df.to_csv(coef_path, index=False)
+    print(f"[coef] saved model coefficients -> {coef_path}")
+
+    # --- worst-prediction error analysis (non-baseline models) ---
+    error_dfs = {}
+    for name in error_models:
+        pred = preds[name]
+        residual = y_test.values - pred
+
+        err_df = test_raw.loc[y_test.index].copy()
+        err_df["actual_response_time_ms"] = y_test.values
+        err_df["predicted_response_time_ms"] = pred
+        err_df["residual_ms"] = residual
+        err_df["abs_residual_ms"] = np.abs(residual)
+        err_df = err_df.sort_values("abs_residual_ms", ascending=False).head(error_top_n)
+
+        err_path = OUT_DIR / f"error_analysis_{name}_top{error_top_n}.csv"
+        err_df.to_csv(err_path, index=False)
+        print(f"[error] saved top {error_top_n} worst predictions ({name}) -> {err_path}")
+        error_dfs[name] = err_df
+
+    return results, preds, coef_df, error_dfs
+
+
+# ==================================================================
+# 7. VISUALIZE
+#    feature-vs-target scatter (raw train) + actual-vs-predicted,
+#    residual plot, residual histogram (per model, on test)
+# ==================================================================
+def visualize(train_raw, y_test, preds, results, target="response_time_ms", model_names=None):
+    # --- feature vs target scatter (raw, pre-feature-engineering train) ---
     feat_dir = OUT_DIR / "feature_vs_target"
     feat_dir.mkdir(exist_ok=True)
 
-    numeric_feats = [c for c in df.select_dtypes(include="number").columns
+    numeric_feats = [c for c in train_raw.select_dtypes(include="number").columns
                       if c != target]
-
     for feat in numeric_feats:
         plt.figure(figsize=(6, 4))
-        plt.scatter(df[feat], df[target], alpha=0.4, color="#4C72B0",
+        plt.scatter(train_raw[feat], train_raw[target], alpha=0.4, color="#4C72B0",
                     label="data point (one request)")
         plt.xlabel(nice(feat))
         plt.ylabel(nice(target))
         plt.title(f"{nice(feat)} vs {nice(target)}")
         plt.legend(loc="upper right", fontsize=8)
         _save_fig(feat_dir / f"{feat}_vs_target.png")
-
     print(f"[visualize] saved {len(numeric_feats)} feature-vs-target plots -> {feat_dir}")
 
-
-def visualize(y_test, preds, results, model_names=None):
+    # --- per-model diagnostic plots (test) ---
     if model_names is None:
         model_names = list(preds.keys())
 
@@ -350,7 +337,7 @@ def visualize(y_test, preds, results, model_names=None):
         residual = y_test.values - pred
         row = results[results["model"] == model_name].iloc[0]
         metrics_text = (f"MAE = {row['MAE']:.1f}\nRMSE = {row['RMSE']:.1f}\n"
-                         f"R² = {row['R2']:.3f}\nAccuracy = {row['Accuracy_%']:.1f}%")
+                         f"R\u00b2 = {row['R2']:.3f}\nAccuracy = {row['Accuracy_%']:.1f}%")
         title_model = nice(model_name)
 
         model_dir = OUT_DIR / model_name
@@ -365,7 +352,7 @@ def visualize(y_test, preds, results, model_names=None):
                   label="perfect prediction line")
         plt.xlabel("Actual Response Time (ms)")
         plt.ylabel("Predicted Response Time (ms)")
-        plt.title(f"Actual vs Predicted — {title_model}")
+        plt.title(f"Actual vs Predicted \u2014 {title_model}")
         plt.legend(loc="upper left", fontsize=8, frameon=False)
         plt.gca().text(0.98, 0.02, metrics_text, transform=plt.gca().transAxes,
                         fontsize=9, va="bottom", ha="right",
@@ -379,8 +366,8 @@ def visualize(y_test, preds, results, model_names=None):
                     label="test request (error at that prediction)")
         plt.axhline(0, color="#C44E52", linestyle="--", label="zero error")
         plt.xlabel("Predicted Response Time (ms)")
-        plt.ylabel("Residual: Actual − Predicted (ms)")
-        plt.title(f"Residual Plot — {title_model}")
+        plt.ylabel("Residual: Actual \u2212 Predicted (ms)")
+        plt.title(f"Residual Plot \u2014 {title_model}")
         plt.legend(loc="upper right", fontsize=8, frameon=False)
         _save_fig(model_dir / "residual_plot.png")
 
@@ -389,78 +376,52 @@ def visualize(y_test, preds, results, model_names=None):
         plt.hist(residual, bins=30, color="#4C72B0",
                   label="number of test requests")
         plt.axvline(0, color="#C44E52", linestyle="--", label="zero error")
-        plt.xlabel("Residual: Actual − Predicted (ms)")
+        plt.xlabel("Residual: Actual \u2212 Predicted (ms)")
         plt.ylabel("Number of Test Requests")
-        plt.title(f"Residual Distribution — {title_model}")
+        plt.title(f"Residual Distribution \u2014 {title_model}")
         plt.legend(loc="upper right", fontsize=8, frameon=False)
         _save_fig(model_dir / "residual_hist.png")
 
         print(f"[visualize] saved plots for {model_name} -> {model_dir}")
 
 
-# ---------------------------------------------------------------- 8. COEFFICIENTS
-def extract_coefficients(models, feature_cols):
-    """Per-feature weight for every model that has one:
-    - LinearRegression -> coef_
-    - DecisionTree / RandomForest -> feature_importances_
-    - MeanBaseline -> has neither, so it's skipped."""
-    rows = []
-    for name, m in models.items():
-        if hasattr(m, "coef_"):
-            for feat, val in zip(feature_cols, m.coef_):
-                rows.append({"model": name, "feature": feat,
-                             "value": val, "value_type": "coefficient"})
-        elif hasattr(m, "feature_importances_"):
-            for feat, val in zip(feature_cols, m.feature_importances_):
-                rows.append({"model": name, "feature": feat,
-                             "value": val, "value_type": "importance"})
-        else:
-            print(f"[coef] {name} has no coefficients/importances, skipped")
-
-    coef_df = pd.DataFrame(rows)
-    out_path = OUT_DIR / "model_coefficients.csv"
-    coef_df.to_csv(out_path, index=False)
-    print(f"[coef] saved model coefficients -> {out_path}")
-    return coef_df
-
-
-# ---------------------------------------------------------------- MAIN
+# ==================================================================
+# MAIN — Load -> Clean -> Analyze -> Feature Engineering -> Train
+#         -> Evaluate -> Visualize  (Pearson runs alongside, outside
+#         the numbered pipeline, between Feature Engineering and Train)
+# ==================================================================
 if __name__ == "__main__":
+    # 1. LOAD
     df = load_data()
-    df = clean_structural(df)
-    train_df, test_df = split_data(df)
 
+    # 2. CLEAN
     numeric_cols = ["dns_time_ms", "tcp_connect_ms", "tls_time_ms", "rtt_ms",
                      "response_size", "response_time_ms"]
-    train_df, test_df = clean_statistical(train_df, test_df, numeric_cols)
+    train_df, test_df = clean(df, numeric_cols)
 
+    # 3. ANALYZE
     analyze(train_df, "train")
-    visualize_feature_target(train_df)
-    analyze_network_components(train_df)
+    train_raw = train_df.copy()  # pre-feature-engineering, for feature-vs-target plots
+    test_raw = test_df.copy()    # pre-encoding, human-readable, for error analysis
 
-    test_raw = test_df.copy()  # human-readable, pre-encoding — used for error analysis later
+    # 4. FEATURE ENGINEERING
+    train_df, test_df, feature_cols, scaler = feature_engineer(train_df, test_df)
 
-    train_df, test_df = feature_engineer(train_df, test_df)
-
-    feature_cols = [c for c in train_df.columns if c != "response_time_ms"]
-
+    # PEARSON (outside the pipeline, train-only, feature-engineered data)
     corr_df = compute_correlations(train_df)
     visualize_correlations(corr_df)
-
-    train_df, test_df, scaler = scale_features(train_df, test_df, feature_cols)
 
     X_train, y_train = train_df[feature_cols], train_df["response_time_ms"]
     X_test, y_test = test_df[feature_cols], test_df["response_time_ms"]
 
+    # 5. TRAIN
     models = train_models(X_train, y_train)
-    results, preds = evaluate(models, X_test, y_test)
-    visualize(y_test, preds, results)
 
-    coef_df = extract_coefficients(models, feature_cols)
+    # 6. EVALUATE
+    results, preds, coef_df, error_dfs = evaluate(models, X_test, y_test, test_raw, feature_cols)
 
-    best_model = results.loc[results["R2"].idxmax(), "model"]
-    err_df, err_by_domain = analyze_errors(test_raw, y_test, preds, model_name=best_model)
-    print(f"[error] worst-case analysis run on best model by R2: {best_model}")
+    # 7. VISUALIZE
+    visualize(train_raw, y_test, preds, results)
 
     results.to_csv(OUT_DIR / "model_results.csv", index=False)
     print(f"\n[main] pipeline complete. results saved to {OUT_DIR/'model_results.csv'}")
