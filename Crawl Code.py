@@ -6,7 +6,7 @@ import datetime
 import pandas as pd
 from pathlib import Path
 
-OUT_DIR = Path(__file__).resolve().parent / "input"
+OUT_DIR = Path(__file__).resolve().parent / "inputs"
 OUT_DIR.mkdir(exist_ok=True)
 
 iterations = 10
